@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>한국 복권 번호 예측기 — Supabase + LSTM</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+  </head>
+  <body class="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 text-slate-100">
+    <div class="mx-auto max-w-3xl px-4 py-10">
+      <header class="mb-10 text-center">
+        <h1 class="text-3xl font-bold tracking-tight text-white">한국 복권 번호 예측기</h1>
+        <p class="mt-2 text-sm text-slate-300">TensorFlow.js LSTM + Supabase + 5세트 추출 (브라우저)</p>
+        <p class="mt-3 rounded-lg border border-amber-900/50 bg-amber-950/30 px-3 py-2 text-xs leading-relaxed text-amber-200/90">
+          <strong>설정:</strong> <code class="text-amber-100">web/js/config.js</code>에 Supabase <strong>anon public</strong> 키를 넣어 주세요. <strong>service_role</strong> 키는 브라우저에 넣으면 안 됩니다. RLS가 있으면 Supabase 대시보드 <strong>SQL Editor</strong>에서 <code class="text-amber-100">web/supabase-rls.sql</code> 내용을 실행하세요.
+        </p>
+      </header>
+
+      <section class="mb-8 rounded-2xl border border-slate-700/80 bg-slate-900/50 p-6 shadow-xl">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <h2 class="text-lg font-semibold text-white">상태</h2>
+          <button type="button" id="btn-refresh" class="rounded-lg bg-slate-700 px-4 py-2 text-sm font-medium hover:bg-slate-600">새로고침</button>
+        </div>
+        <div id="status" class="mt-4 text-sm text-slate-300"></div>
+      </section>
+
+      <section class="mb-8 rounded-2xl border border-slate-700/80 bg-slate-900/50 p-6 shadow-xl">
+        <h2 class="text-lg font-semibold text-white">회차 입력 (당첨 번호 6개)</h2>
+        <form id="form-input" class="mt-4 grid gap-4 sm:grid-cols-2">
+          <div>
+            <label class="block text-xs text-slate-400">회차</label>
+            <input id="in-round" type="number" min="1" required class="mt-1 w-full rounded-lg border border-slate-600 bg-slate-800 px-3 py-2" />
+          </div>
+          <div class="sm:col-span-2">
+            <label class="block text-xs text-slate-400">번호 6개 (공백/콤마)</label>
+            <input id="in-nums" type="text" placeholder="3 11 15 23 35 44" class="mt-1 w-full rounded-lg border border-slate-600 bg-slate-800 px-3 py-2" />
+          </div>
+          <div class="sm:col-span-2">
+            <button type="submit" class="w-full rounded-lg bg-indigo-600 py-2.5 font-medium hover:bg-indigo-500 sm:w-auto sm:px-8">저장 / 수정</button>
+          </div>
+        </form>
+        <p id="log" class="mt-3 text-sm text-amber-200/90"></p>
+      </section>
+
+      <section class="mb-8 rounded-2xl border border-slate-700/80 bg-slate-900/50 p-6 shadow-xl">
+        <h2 class="text-lg font-semibold text-white">다음 회차 예측 (5세트)</h2>
+        <p class="mt-1 text-xs text-slate-400">최대 회차가 100인 동안에는 101회만 (규칙상) 예측합니다. 그 외에는 항상 (최대 회차 + 1)회입니다.</p>
+        <button type="button" id="btn-predict" class="mt-4 rounded-lg bg-emerald-700 px-6 py-2.5 font-medium hover:bg-emerald-600">LSTM 학습 후 5세트 생성</button>
+        <p id="predict-log" class="mt-3 text-sm text-slate-300"></p>
+        <div id="sets-out" class="mt-4 space-y-2"></div>
+      </section>
+
+      <section class="rounded-2xl border border-slate-700/80 bg-slate-900/50 p-6 shadow-xl">
+        <h2 class="text-lg font-semibold text-white">실제 당첨 번호 · 일치 표시</h2>
+        <form id="form-result" class="mt-4 grid gap-4 sm:grid-cols-2">
+          <div>
+            <label class="block text-xs text-slate-400">회차</label>
+            <input id="res-round" type="number" min="1" required class="mt-1 w-full rounded-lg border border-slate-600 bg-slate-800 px-3 py-2" />
+          </div>
+          <div class="sm:col-span-2">
+            <label class="block text-xs text-slate-400">실제 번호 6개</label>
+            <input id="res-nums" type="text" placeholder="1 9 12 23 39 43" class="mt-1 w-full rounded-lg border border-slate-600 bg-slate-800 px-3 py-2" />
+          </div>
+          <div class="sm:col-span-2">
+            <button type="submit" class="w-full rounded-lg bg-violet-600 py-2.5 font-medium hover:bg-violet-500 sm:w-auto sm:px-8">비교 후 DB 반영</button>
+          </div>
+        </form>
+        <div id="result-out" class="mt-4 text-sm text-slate-200"></div>
+      </section>
+
+      <footer class="mt-10 text-center text-xs text-slate-500">복권은 매 회차 독립 추처입니다. 예측은 참고용이며 당첨을 보장하지 않습니다.</footer>
+    </div>
+    <script src="js/config.js"></script>
+    <script src="js/app.js"></script>
+  </body>
+</html>
