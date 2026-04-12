@@ -2,7 +2,7 @@
   'use strict';
 
   const MIN_FOR_FIRST_PREDICT = 5;
-  const LSTM_EPOCHS = 60;
+  const LSTM_EPOCHS = 60; // fallback (동적 계산으로 덮어씀)
 
   function getClient() {
     const c = window.LOTTO_CONFIG;
@@ -503,20 +503,39 @@
         let seqLen = Math.min(12, numsOnly.length - 1);
         seqLen = Math.max(1, seqLen);
 
+        // 회차 수에 따라 epoch·seqLen 동적 조정 (많을수록 빠르게)
+        // 데이터가 많으면 샘플도 많아 적은 epoch로도 수렴
+        const n = numsOnly.length;
+        let dynamicEpochs;
+        let dynamicSeqLen;
+        if (n <= 30) {
+          dynamicEpochs = 80;  dynamicSeqLen = Math.min(8,  seqLen);
+        } else if (n <= 100) {
+          dynamicEpochs = 60;  dynamicSeqLen = Math.min(10, seqLen);
+        } else if (n <= 200) {
+          dynamicEpochs = 40;  dynamicSeqLen = Math.min(12, seqLen);
+        } else if (n <= 350) {
+          dynamicEpochs = 25;  dynamicSeqLen = Math.min(12, seqLen);
+        } else {
+          dynamicEpochs = 18;  dynamicSeqLen = Math.min(10, seqLen);
+        }
+
         predictLog.textContent =
-          'LSTM \ud559\uc2b5 \uc911\u2026 (~' + LSTM_EPOCHS + ' epoch, \uc2dc\ud000\uc2a4=' + seqLen + ') \u2192 5-way \uc559\uc0c1\ube14 \uc801\uc6a9 \uc911';
+          'LSTM \ud559\uc2b5 \uc911\u2026 (' + n + '\ud68c\ucc28 \ub370\uc774\ud130, ' +
+          dynamicEpochs + ' epoch, seq=' + dynamicSeqLen +
+          ') \u2192 5-way \uc559\uc0c1\ube14 \uc801\uc6a9 \uc911';
         const multihot = roundsToMultihot(numsOnly);
         const lstmProbs = await trainAndPredictLstm(
           multihot,
-          seqLen,
-          LSTM_EPOCHS
+          dynamicSeqLen,
+          dynamicEpochs
         );
 
-        const coldHot   = coldHotWeights(numsOnly, 10);         // Cold/Hot
-        const pat       = patternMatchBoost(numsOnly, seqLen);  // 패턴 매칭
-        const gap       = gapWeights(numsOnly);                  // 미출현 Gap
-        const regression = regressionTrendWeights(numsOnly);    // 회귀 트렌드
-        const gbm       = gbmScores(numsOnly);                   // GBM 빈도 모델
+        const coldHot   = coldHotWeights(numsOnly, 10);                // Cold/Hot
+        const pat       = patternMatchBoost(numsOnly, dynamicSeqLen);  // 패턴 매칭
+        const gap       = gapWeights(numsOnly);                         // 미출현 Gap
+        const regression = regressionTrendWeights(numsOnly);           // 회귀 트렌드
+        const gbm       = gbmScores(numsOnly);                          // GBM 빈도 모델
         const [sumLow, sumHigh] = movingAverageSumBias(numsOnly, 20);
 
         // ── 5-way 앙상블 (기하 평균 방식으로 과도한 지배 방지) ─────────────
