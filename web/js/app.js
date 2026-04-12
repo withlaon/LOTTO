@@ -1,7 +1,7 @@
 (function () {
   'use strict';
 
-  const MIN_FOR_101 = 100;
+  const MIN_FOR_FIRST_PREDICT = 5;
   const LSTM_EPOCHS = 60;
 
   function getClient() {
@@ -402,21 +402,21 @@
       try {
         const { rows, maxR, next } = await refreshStatus(client, statusEl);
         if (!rows.length) {
-          predictLog.textContent = 'Add history rounds first.';
+          predictLog.textContent = '\ud68c\ucc28 \ub370\uc774\ud130\ub97c \uba3c\uc800 \uc785\ub825\ud558\uc138\uc694.';
           return;
         }
-        if (next === 101 && maxR < MIN_FOR_101) {
+        if (rows.length < MIN_FOR_FIRST_PREDICT) {
           predictLog.textContent =
-            'Before predicting 101, enter rounds through ' +
-            MIN_FOR_101 +
-            '. Latest is ' +
-            maxR +
-            '.';
+            '\uc608\uce21\ud558\ub824\uba74 \ucd5c\uc18c ' +
+            MIN_FOR_FIRST_PREDICT +
+            '\ud68c\ucc28 \uc774\uc0c1 \uc785\ub825\uc774 \ud544\uc694\ud569\ub2c8\ub2e4. (\ud604\uc7ac ' +
+            rows.length +
+            '\ud68c\ucc28)';
           return;
         }
         const numsOnly = rows.map((r) => r.numbers);
         if (numsOnly.length < 2) {
-          predictLog.textContent = 'Need at least 2 rounds.';
+          predictLog.textContent = '\uc608\uce21\ud558\ub824\uba74 \ucd5c\uc18c 2\ud68c\ucc28 \uc774\uc0c1 \ud544\uc694\ud569\ub2c8\ub2e4.';
           return;
         }
 
