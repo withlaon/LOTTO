@@ -1,6 +1,3 @@
-python-dotenv>=1.0.0
-supabase>=2.3.0
-torch>=2.0.0
-numpy>=1.24.0
-rich>=13.0.0
+# Web server only — Flask serves the static web/ folder.
+# No PyTorch or Supabase client needed (browser connects to Supabase directly).
 flask>=3.0.0

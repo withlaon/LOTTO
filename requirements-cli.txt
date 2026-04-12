@@ -1,0 +1,8 @@
+# Full dependencies for the Python CLI (main.py).
+# Use this locally: pip install -r requirements-cli.txt
+python-dotenv>=1.0.0
+supabase>=2.3.0
+torch>=2.0.0
+numpy>=1.24.0
+rich>=13.0.0
+flask>=3.0.0
