@@ -112,6 +112,70 @@
     return out;
   }
 
+  // ── NEW: Gap weights (미출현 기간 분석) ───────────────────────────────────
+  function gapWeights(historyRounds, size) {
+    const lastSeen = new Array(size).fill(historyRounds.length);
+    for (let i = 0; i < size; i++) {
+      for (let r = historyRounds.length - 1; r >= 0; r--) {
+        if (historyRounds[r].includes(i + 1)) {
+          lastSeen[i] = historyRounds.length - 1 - r;
+          break;
+        }
+      }
+    }
+    const maxGap = Math.max(...lastSeen) + 1;
+    const w = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+      const norm = lastSeen[i] / maxGap;
+      w[i] = 0.4 + 0.9 * norm;
+    }
+    return w;
+  }
+
+  // ── NEW: Regression trend weights (번호별 최근 트렌드 상승/하락) ──────────
+  function regressionTrendWeights(historyRounds, window_, size) {
+    window_ = window_ || 20;
+    size = size || 45;
+    const w = new Float64Array(size).fill(1);
+    if (historyRounds.length < window_ * 2) return w;
+    const recent = historyRounds.slice(-window_);
+    const old    = historyRounds.slice(-window_ * 2, -window_);
+    const rCnt = new Float64Array(size);
+    const oCnt = new Float64Array(size);
+    for (const nums of recent) for (const n of nums) rCnt[n - 1]++;
+    for (const nums of old)    for (const n of nums) oCnt[n - 1]++;
+    for (let i = 0; i < size; i++) {
+      const trend = (rCnt[i] + 0.5) / (oCnt[i] + 0.5);
+      w[i] = Math.min(2.0, Math.max(0.3, trend));
+    }
+    return w;
+  }
+
+  // ── NEW: Simplified Gradient Boost (XGBoost-style frequency model) ───────
+  function gbmScores(historyRounds, size) {
+    size = size || 45;
+    const n = historyRounds.length;
+    const scores = new Float64Array(size);
+    const window5  = historyRounds.slice(-5);
+    const window10 = historyRounds.slice(-10);
+    const window30 = historyRounds.slice(-30);
+    const allRounds = historyRounds;
+    function cnt(slice, idx) {
+      let c = 0;
+      for (const r of slice) if (r.includes(idx + 1)) c++;
+      return c;
+    }
+    for (let i = 0; i < size; i++) {
+      const f5  = cnt(window5,  i) / (window5.length  + 1e-9);
+      const f10 = cnt(window10, i) / (window10.length + 1e-9);
+      const f30 = cnt(window30, i) / (window30.length + 1e-9);
+      const fall = cnt(allRounds, i) / (n + 1e-9);
+      // weighted residual boosting: recent windows have higher leaf weight
+      scores[i] = 0.35 * f5 + 0.30 * f10 + 0.20 * f30 + 0.15 * fall + 1e-6;
+    }
+    return scores;
+  }
+
   function movingAverageSumBias(historyRounds, lookback) {
     const slice = historyRounds.slice(-lookback);
     const sums = slice.map((r) => r.reduce((a, b) => a + b, 0));
@@ -136,10 +200,26 @@
     );
   }
 
+  // ── NEW: consecutive number check ────────────────────────────────────────
+  function hasExcessiveConsecutive(nums) {
+    const sorted = nums.slice().sort(function (a, b) { return a - b; });
+    let run = 1;
+    for (let i = 1; i < sorted.length; i++) {
+      if (sorted[i] === sorted[i - 1] + 1) {
+        run++;
+        if (run > 2) return true; // 3개 이상 연속 → 제외
+      } else {
+        run = 1;
+      }
+    }
+    return false;
+  }
+
   function passesFilters(nums, sumLow, sumHigh, strictOE) {
     const s = nums.reduce((a, b) => a + b, 0);
     if (s < sumLow || s > sumHigh) return false;
     if (strictOE && !oddEvenOk(nums)) return false;
+    if (hasExcessiveConsecutive(nums)) return false;
     return true;
   }
 
@@ -424,7 +504,7 @@
         seqLen = Math.max(1, seqLen);
 
         predictLog.textContent =
-          'Training LSTM (~' + LSTM_EPOCHS + ' epochs, seq=' + seqLen + ')…';
+          'LSTM \ud559\uc2b5 \uc911\u2026 (~' + LSTM_EPOCHS + ' epoch, \uc2dc\ud000\uc2a4=' + seqLen + ') \u2192 5-way \uc559\uc0c1\ube14 \uc801\uc6a9 \uc911';
         const multihot = roundsToMultihot(numsOnly);
         const lstmProbs = await trainAndPredictLstm(
           multihot,
@@ -432,12 +512,24 @@
           LSTM_EPOCHS
         );
 
-        const coldHot = coldHotWeights(numsOnly, 10);
-        const pat = patternMatchBoost(numsOnly, seqLen);
+        const coldHot   = coldHotWeights(numsOnly, 10);         // Cold/Hot
+        const pat       = patternMatchBoost(numsOnly, seqLen);  // 패턴 매칭
+        const gap       = gapWeights(numsOnly);                  // 미출현 Gap
+        const regression = regressionTrendWeights(numsOnly);    // 회귀 트렌드
+        const gbm       = gbmScores(numsOnly);                   // GBM 빈도 모델
         const [sumLow, sumHigh] = movingAverageSumBias(numsOnly, 20);
+
+        // ── 5-way 앙상블 (기하 평균 방식으로 과도한 지배 방지) ─────────────
+        // LSTM 40% · GBM 20% · Cold/Hot 15% · Gap 15% · Regression 10%
         const base = new Float64Array(45);
         for (let i = 0; i < 45; i++) {
-          base[i] = lstmProbs[i] * coldHot[i] * pat[i];
+          const v =
+            Math.pow(Math.max(lstmProbs[i], 1e-9), 0.40) *
+            Math.pow(Math.max(gbm[i],        1e-9), 0.20) *
+            Math.pow(Math.max(coldHot[i],    1e-9), 0.15) *
+            Math.pow(Math.max(gap[i],        1e-9), 0.15) *
+            Math.pow(Math.max(regression[i], 1e-9), 0.10);
+          base[i] = v;
         }
         let s = 0;
         for (let i = 0; i < 45; i++) s += base[i];
@@ -464,12 +556,13 @@
         if (error) throw error;
 
         predictLog.textContent =
-          'Saved prediction id=' +
+          '\ud83e\udd16 \uc559\uc0c1\ube14 \uc608\uce21 \uc644\ub8cc (\ud68c\ucc28: ' +
+          next +
+          ' | \uc800\uc7a5 ID: ' +
           ins.id +
-          '. Sum filter: ' +
-          sumLow +
-          '–' +
-          sumHigh;
+          ' | \ud569\uacc4 \ubc94\uc704: ' +
+          sumLow + '\u2013' + sumHigh +
+          ' | LSTM\u00b740%\u00b7GBM\u00b720%\u00b7Cold\u2215Hot\u00b715%\u00b7Gap\u00b715%\u00b7Trend\u00b710%)';
         const roundHeading =
           '<div class="mb-3 rounded-lg border border-amber-600/40 bg-slate-800/70 px-4 py-3 text-center">' +
           '<span class="text-xl font-bold text-amber-200">' +
