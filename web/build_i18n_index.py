@@ -57,9 +57,6 @@ def main() -> None:
       <header class="mb-10 text-center">
         <h1 class="text-3xl font-bold tracking-tight text-white">{KO["h1"]}</h1>
         <p class="mt-2 text-sm text-slate-300">{KO["subtitle"]}</p>
-        <p class="mt-3 rounded-lg border border-amber-900/50 bg-amber-950/30 px-3 py-2 text-xs leading-relaxed text-amber-200/90">
-          {KO["notice"]}
-        </p>
       </header>
 
       <section class="mb-8 rounded-2xl border border-slate-700/80 bg-slate-900/50 p-6 shadow-xl">
