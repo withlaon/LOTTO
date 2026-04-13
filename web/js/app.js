@@ -14,6 +14,40 @@
     return lib.createClient(c.supabaseUrl, c.supabaseAnonKey);
   }
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // Adaptive seqLen selection
+  // 최소 20 보장. 데이터가 충분하면 복수의 seqLen 후보를 반환해
+  // LSTM 멀티-시퀀스 앙상블을 수행한다.
+  //   반환값: { seqLens: number[], maxEpochs: number }
+  //   seqLens[0] = primary (가장 김 / 최대 패턴), seqLens[1] = secondary (중간)
+  // ─────────────────────────────────────────────────────────────────────────
+  function adaptiveSeqLens(n) {
+    const MIN_SEQ = 20;
+
+    // 데이터가 너무 적으면 MIN_SEQ 미달이지만 n-1 사용
+    if (n < MIN_SEQ + 2) {
+      const s = Math.max(1, n - 1);
+      return { seqLens: [s], maxEpochs: 120 };
+    }
+
+    // primary seqLen: 최소 20 보장, 데이터 많을수록 늘림
+    let primary, maxEpochs;
+    if      (n <= 100) { primary = 20; maxEpochs = 80; }
+    else if (n <= 200) { primary = 24; maxEpochs = 60; }
+    else if (n <= 350) { primary = 28; maxEpochs = 50; }
+    else               { primary = 32; maxEpochs = 40; }
+    primary = Math.min(primary, n - 1);
+
+    // secondary seqLen: primary보다 짧게(최신 트렌드 집중)
+    // 두 seqLen이 달라야 하고, secondary도 MIN_SEQ 이상이어야 함
+    const secondary = Math.max(MIN_SEQ, primary - 10);
+    const seqLens = (secondary < primary && n >= primary + 5)
+      ? [primary, secondary]
+      : [primary];
+
+    return { seqLens, maxEpochs };
+  }
+
   // ── Seeded RNG ───────────────────────────────────────────────────────────
   function mulberry32(a) {
     return function () {
@@ -574,34 +608,53 @@
 
         const n = numsOnly.length;
 
-        // ── 회차 수에 따른 동적 seqLen·maxEpoch 설정 ─────────────────────
-        // 데이터 많을수록 seqLen 길게 (패턴 더 잘 잡음), epoch는 EarlyStopping으로 자동 조기 종료
-        let dynamicSeqLen, dynamicMaxEpochs;
-        if      (n <= 30)  { dynamicSeqLen = 8;  dynamicMaxEpochs = 100; }
-        else if (n <= 100) { dynamicSeqLen = 12; dynamicMaxEpochs = 80;  }
-        else if (n <= 200) { dynamicSeqLen = 20; dynamicMaxEpochs = 60;  }
-        else if (n <= 350) { dynamicSeqLen = 24; dynamicMaxEpochs = 50;  }
-        else               { dynamicSeqLen = 30; dynamicMaxEpochs = 40;  }
-        dynamicSeqLen = Math.min(dynamicSeqLen, n - 1);
+        // ── 적응형 seqLen 자동 선택 ───────────────────────────────────────
+        // 최소 20 보장. 데이터 양에 따라 primary/secondary seqLen 자동 결정.
+        // primary > secondary 두 가지로 LSTM을 각각 학습한 뒤 블렌딩 → 장·단기 패턴 동시 포착.
+        const { seqLens, maxEpochs: dynamicMaxEpochs } = adaptiveSeqLens(n);
+        const seqPrimary   = seqLens[0];
+        const seqSecondary = seqLens.length > 1 ? seqLens[1] : null;
+        const seqDesc = seqSecondary
+          ? 'seq=[' + seqPrimary + ',' + seqSecondary + ']'
+          : 'seq=' + seqPrimary;
 
         // ── 피처 엔지니어링 (MinMaxScaler + MA10 + Gap) ───────────────────
         predictLog.textContent =
-          '\ud53c\ucc98 \uc5d4\uc9c0\ub2c8\uc5b4\ub9c1 \uc911\u2026 (MinMax \uc815\uaddc\ud654 + MA10 + Gap | 135\ucc28\uc6d0)';
+          '\ud53c\ucc98 \uc5d4\uc9c0\ub2c8\uc5b4\ub9c1 \uc911\u2026 (MinMax \uc815\uaddc\ud654 + MA10 + Gap | 135\ucc28\uc6d0 | ' + seqDesc + ')';
         const { features } = buildEnrichedFeatures(numsOnly);
 
-        // ── Model 1: LSTM ─────────────────────────────────────────────────
+        // ── Model 1: LSTM (primary seqLen) ────────────────────────────────
         predictLog.textContent =
-          '[1/3] LSTM \ud559\uc2b5 \uc911\u2026 (' + n + '\ud68c\ucc28, seq=' +
-          dynamicSeqLen + ', max ' + dynamicMaxEpochs + 'ep, EarlyStopping)';
-        const lstmProbs = await trainAndPredictLstm(features, dynamicSeqLen, dynamicMaxEpochs);
+          '[1/' + (seqSecondary ? '4' : '3') + '] LSTM \ud559\uc2b5 \uc911\u2026 (' +
+          n + '\ud68c\ucc28, seq=' + seqPrimary +
+          ', max ' + dynamicMaxEpochs + 'ep, EarlyStopping)';
+        const lstmProbsA = await trainAndPredictLstm(features, seqPrimary, dynamicMaxEpochs);
+
+        // ── Model 1-B: LSTM (secondary seqLen, 데이터 충분할 때만) ─────────
+        let lstmProbs;
+        if (seqSecondary) {
+          predictLog.textContent =
+            '[2/' + '4] LSTM-B \ud559\uc2b5 \uc911\u2026 (seq=' + seqSecondary +
+            ', \ub2e8\uae30 \ud2b8\ub80c\ub4dc \ud3ec\ucc29, EarlyStopping)';
+          const lstmProbsB = await trainAndPredictLstm(features, seqSecondary, dynamicMaxEpochs);
+          // primary(장기) 60% + secondary(단기) 40% 블렌딩
+          lstmProbs = lstmProbsA.map((v, i) => v * 0.6 + lstmProbsB[i] * 0.4);
+        } else {
+          lstmProbs = lstmProbsA;
+        }
 
         // ── Model 2: GRU ──────────────────────────────────────────────────
+        const gruStep = seqSecondary ? '3' : '2';
         predictLog.textContent =
-          '[2/3] GRU \ud559\uc2b5 \uc911\u2026 (seq=' + dynamicSeqLen + ', EarlyStopping)';
-        const gruProbs = await trainAndPredictGru(features, dynamicSeqLen, dynamicMaxEpochs);
+          '[' + gruStep + '/' + (seqSecondary ? '4' : '3') +
+          '] GRU \ud559\uc2b5 \uc911\u2026 (seq=' + seqPrimary + ', EarlyStopping)';
+        const gruProbs = await trainAndPredictGru(features, seqPrimary, dynamicMaxEpochs);
 
         // ── Model 3: MLP ──────────────────────────────────────────────────
-        predictLog.textContent = '[3/3] MLP \ud559\uc2b5 \uc911\u2026 (Dense 128\u219264, EarlyStopping)';
+        const mlpStep = seqSecondary ? '4' : '3';
+        const totalStep = seqSecondary ? '4' : '3';
+        predictLog.textContent =
+          '[' + mlpStep + '/' + totalStep + '] MLP \ud559\uc2b5 \uc911\u2026 (Dense 128\u219264, EarlyStopping)';
         const mlpProbs = await trainAndPredictMlp(features, Math.floor(dynamicMaxEpochs * 0.8));
 
         // ── Heuristics ────────────────────────────────────────────────────
@@ -639,13 +692,14 @@
         predictLog.textContent =
           '\ud83e\udd16 7-way \uc559\uc0c1\ube14 \uc608\uce21 \uc644\ub8cc (\ud68c\ucc28: ' + next +
           ' | ID: ' + ins.id +
+          ' | ' + seqDesc +
           ' | \ud569\uacc4: ' + sumLow + '\u2013' + sumHigh +
           ' | LSTM\u00b730%\u00b7GRU\u00b725%\u00b7MLP\u00b710%\u00b7GBM\u00b715%\u00b7ColdHot\u00b710%\u00b7Gap\u00b77%\u00b7Trend\u00b73%)';
 
         const roundHeading =
           '<div class="mb-3 rounded-lg border border-amber-600/40 bg-slate-800/70 px-4 py-3 text-center">' +
           '<span class="text-xl font-bold text-amber-200">' + next + '\ud68c\ucc28</span>' +
-          '<span class="ml-2 text-sm font-normal text-slate-400">\uc608\uce21 5\uc138\ud2b8 (LSTM+GRU+MLP \uc559\uc0c1\ube14)</span></div>';
+          '<span class="ml-2 text-sm font-normal text-slate-400">\uc608\uce21 5\uc138\ud2b8 \u00b7 ' + seqDesc + ' \u00b7 LSTM+GRU+MLP \uc559\uc0c1\ube14</span></div>';
         setsOut.innerHTML = roundHeading + sets.map(function (row, i) {
           return (
             '<div class="rounded-lg bg-slate-800/80 px-4 py-3 font-mono text-amber-200">Set ' +
